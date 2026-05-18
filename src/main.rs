@@ -61,16 +61,17 @@ enum ToSerial {
 
 enum FromSerial {
     Status(String),
-    RxPair { a: u32, b: u32 },
+    RxPair { a: u32, b: u32, c: u32 },
 }
 
 impl ToSerial {
-    fn to_payload(&self) -> Option<[u8; 8]> {
+    fn to_payload(&self) -> Option<[u8; 12]> {
         match self {
             ToSerial::RxPair { a, b } => {
-                let mut payload = [0u8; 8];
+                let mut payload = [0u8; 12];
                 payload[0..4].copy_from_slice(&a.to_le_bytes());
                 payload[4..8].copy_from_slice(&b.to_le_bytes());
+                payload[8..12].copy_from_slice(&b.to_le_bytes());
                 Some(payload)
             }
             _ => None, // Only RxPair gets sent
@@ -96,6 +97,7 @@ struct App {
 
     latest_a : u32,
     latest_b : u32,
+    latest_c : u32,
     //latest_line: String,
     //latest_number: Option<f64>,
     rx_count: u64,
@@ -125,6 +127,7 @@ impl App {
             rx_count: 0,
             latest_a : 0,
             latest_b : 0,
+            latest_c : 0,
             to_serial,
             from_serial,
             last_poll: Instant::now(),
@@ -218,9 +221,10 @@ impl App {
                             self.port_opened = false;
                         }
                     }
-                FromSerial::RxPair { a, b } => {
+                FromSerial::RxPair { a, b, c } => {
                     self.latest_a = a;
                     self.latest_b = b;
+                    self.latest_c = c;
                     self.rx_count += 1;
                 }
                 /*
@@ -347,7 +351,8 @@ impl eframe::App for App {
             ui.label(format!("RX count: {}", self.rx_count));
             ui.separator();
             ui.label(format!("Period value: {}", self.latest_a));
-            ui.label(format!("Value B: 0x{:X}", self.latest_b));
+            ui.label(format!("Heating element temperature: {}", self.latest_b as f32 / 100.0));
+            ui.label(format!("RMS I: {}", self.latest_c as f32 / 100.0));
             /*
             ui.label(format!("Latest line: {}", self.latest_line));
             ui.label(format!(
@@ -367,22 +372,23 @@ impl eframe::App for App {
 
 const SYNC0: u8 = 0xA5;
 const SYNC1: u8 = 0x5A;
-const FRAME_LEN: usize = 2 + 8 + 2; // 12
+const FRAME_LEN: usize = 2 + 3*4 + 2; // 16
 
 #[derive(Debug, Clone, Copy)]
-struct TwoU32 {
+struct BunchU32 {
     a: u32,
     b: u32,
+    c: u32,
 }
 
-fn build_frame(payload: &[u8; 8]) -> [u8; FRAME_LEN] {
+fn build_frame(payload: &[u8; 12]) -> [u8; FRAME_LEN] {
     let mut buf = [0u8; FRAME_LEN];
     buf[0] = SYNC0;
     buf[1] = SYNC1;
     buf[2..10].copy_from_slice(payload);
 
-    let crc = crc16_ccitt_false(&buf[0..10]);
-    buf[10..12].copy_from_slice(&crc.to_le_bytes());
+    let crc = crc16_ccitt_false(&buf[0..14]);
+    buf[14..16].copy_from_slice(&crc.to_le_bytes());
     buf
 }
 
@@ -402,7 +408,7 @@ fn crc16_ccitt_false(data: &[u8]) -> u16 {
     crc
 }
 
-fn try_extract_frame(rx: &mut Vec<u8>) -> Option<TwoU32> {
+fn try_extract_frame(rx: &mut Vec<u8>) -> Option<BunchU32> {
     // Keep enough data for at least a frame
     loop {
         if rx.len() < FRAME_LEN {
@@ -437,8 +443,8 @@ fn try_extract_frame(rx: &mut Vec<u8>) -> Option<TwoU32> {
         }
 
         // Validate CRC
-        let crc_expected = u16::from_le_bytes([rx[10], rx[11]]);
-        let crc_calc = crc16_ccitt_false(&rx[0..10]);
+        let crc_expected = u16::from_le_bytes([rx[14], rx[15]]);
+        let crc_calc = crc16_ccitt_false(&rx[0..14]);
         if crc_calc != crc_expected {
             // False sync hit, drop first byte and keep searching
             rx.drain(0..1);
@@ -448,11 +454,12 @@ fn try_extract_frame(rx: &mut Vec<u8>) -> Option<TwoU32> {
         // Parse payload
         let a = u32::from_le_bytes([rx[2], rx[3], rx[4], rx[5]]);
         let b = u32::from_le_bytes([rx[6], rx[7], rx[8], rx[9]]);
+        let c = u32::from_le_bytes([rx[10], rx[11], rx[12], rx[13]]);
 
         // Consume this frame
         rx.drain(0..FRAME_LEN);
 
-        return Some(TwoU32 { a, b });
+        return Some(BunchU32 { a, b, c });
     }
 }
 
@@ -532,7 +539,7 @@ fn spawn_serial_thread(cmd_rx: Receiver<ToSerial>, out_tx: Sender<FromSerial>) {
                         rx_bytes.extend_from_slice(&read_buf[..n]);
 
                         while let Some(pair) = try_extract_frame(&mut rx_bytes) {
-                            let _ = out_tx.send(FromSerial::RxPair { a: pair.a, b: pair.b });
+                            let _ = out_tx.send(FromSerial::RxPair { a: pair.a, b: pair.b, c: pair.c });
                         }
 
                         // Optional safety: prevent runaway memory if stream is garbage
