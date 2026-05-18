@@ -50,7 +50,7 @@ enum ToSerial {
     Open { port: String, baud: u32 },
     Close,
     //SendLine(String),
-    RxPair { a : u32, b: u32 },
+    RxPair { a : u32, b: u32, c: u32 },
 }
 
 // enum FromSerial {
@@ -67,11 +67,11 @@ enum FromSerial {
 impl ToSerial {
     fn to_payload(&self) -> Option<[u8; 12]> {
         match self {
-            ToSerial::RxPair { a, b } => {
+            ToSerial::RxPair { a, b , c} => {
                 let mut payload = [0u8; 12];
                 payload[0..4].copy_from_slice(&a.to_le_bytes());
                 payload[4..8].copy_from_slice(&b.to_le_bytes());
-                payload[8..12].copy_from_slice(&b.to_le_bytes());
+                payload[8..12].copy_from_slice(&c.to_le_bytes());
                 Some(payload)
             }
             _ => None, // Only RxPair gets sent
@@ -196,13 +196,13 @@ impl App {
                 return;
             }
         };
-        if v < 15.0 || v > 80.0 {
-            self.status = format!("Invalid value, must be with-in 15.0 to 80.0 KHz: {v}");
+        if v < 15.0 || v > 60.0 {
+            self.status = format!("Invalid value, must be with-in 15.0 to 60.0 KHz: {v}");
             return;
         }
-        let period = 100000000.0 / (v * 1000.0);
+        let period = 100000000.0 / (v * 1000.0); //100mhz here because pwm is up-down counting
         let period_u : u32 = period.round() as u32;
-        let _ = self.to_serial.send(ToSerial::RxPair {a : period_u, b : 0});
+        let _ = self.to_serial.send(ToSerial::RxPair {a : period_u, b : 0, c : 0});
         //let line = format!("{v}\n");
         //let _ = self.to_serial.send(ToSerial::SendLine(line));
     }
@@ -348,7 +348,7 @@ impl eframe::App for App {
             ui.separator();
 
             ui.label(format!("Status: {}", self.status));
-            ui.label(format!("RX count: {}", self.rx_count));
+            ui.label(format!("RX packets count: {}", self.rx_count));
             ui.separator();
             ui.label(format!("Period value: {}", self.latest_a));
             ui.label(format!("Heating element temperature: {}", self.latest_b as f32 / 100.0));
@@ -385,7 +385,7 @@ fn build_frame(payload: &[u8; 12]) -> [u8; FRAME_LEN] {
     let mut buf = [0u8; FRAME_LEN];
     buf[0] = SYNC0;
     buf[1] = SYNC1;
-    buf[2..10].copy_from_slice(payload);
+    buf[2..14].copy_from_slice(payload);
 
     let crc = crc16_ccitt_false(&buf[0..14]);
     buf[14..16].copy_from_slice(&crc.to_le_bytes());
@@ -501,9 +501,9 @@ fn spawn_serial_thread(cmd_rx: Receiver<ToSerial>, out_tx: Sender<FromSerial>) {
                         set_status("Closed".to_string());
                         line_buf.clear();
                     }
-                    ToSerial::RxPair {a,b} => {
+                    ToSerial::RxPair {a,b, c} => {
                         if let Some(p) = port.as_mut() {
-                            let msg = ToSerial::RxPair {a, b};
+                            let msg = ToSerial::RxPair {a, b, c};
                             if let Some(payload) = msg.to_payload() {
                                 let frame = build_frame(&payload);
                                 if let Err(e) = p.write_all(&frame) {
